@@ -119,5 +119,5 @@
   <!-- svelte-ignore a11y_media_has_caption -->
   <video bind:this={video} class="hidden-video" playsinline muted autoplay
   ></video>
-  <canvas bind:this={canvas}></canvas>
+  <canvas bind:this={canvas} width="1280" height="720"></canvas>
 </div>
