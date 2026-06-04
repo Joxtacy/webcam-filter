@@ -21,6 +21,16 @@ const POTATO_SCALE = 2.0;
 const HOLE_EXPAND = 1.15;
 // Extra outward spacing for the eyes (fraction of half the eye spacing).
 const EYE_SEPARATION = 0.35;
+// Wide-eye effect: eye-aspect-ratio (lid gap / eye width) at a relaxed open
+// eye vs. wide open, and the max extra scale applied to a fully wide eye.
+const EAR_NORMAL = 0.27;
+const EAR_WIDE = 0.42;
+const EYE_WIDE_MAX_BOOST = 1.9;
+// Open-mouth effect: mouth-aspect-ratio (lip gap / mouth width) when closed
+// vs. wide open, and the max extra scale applied to a fully open mouth.
+const MAR_NORMAL = 0.05;
+const MAR_WIDE = 0.5;
+const MOUTH_WIDE_MAX_BOOST = 1.7;
 // Feather radius for hole edges, as a fraction of the potato width.
 const FEATHER_FRAC = 0.014;
 // Chroma key background — pure green keys cleanly in OBS.
@@ -124,6 +134,38 @@ function featurePolygon(
   }));
 }
 
+/**
+ * Openness ratio of a feature: vertical gap (upper→lower) divided by
+ * horizontal width (corner→corner), in pixel space so the camera's aspect
+ * ratio doesn't skew it. Works for both eyes (lids) and mouth (lips).
+ */
+function openRatio(
+  lm: NormalizedPoint[],
+  upper: number,
+  lower: number,
+  cornerA: number,
+  cornerB: number,
+  videoW: number,
+  videoH: number,
+): number {
+  const dist = (a: number, b: number) =>
+    Math.hypot((lm[a].x - lm[b].x) * videoW, (lm[a].y - lm[b].y) * videoH);
+  const width = dist(cornerA, cornerB);
+  return width > 0 ? dist(upper, lower) / width : 0;
+}
+
+/** Map an openness ratio to an extra scale: 1 at `normal`, up to `maxBoost`
+ * at `wide`. Never shrinks the feature. */
+function openBoost(
+  ratio: number,
+  normal: number,
+  wide: number,
+  maxBoost: number,
+): number {
+  const f = (ratio - normal) / (wide - normal);
+  return Math.max(1, Math.min(maxBoost, 1 + f * (maxBoost - 1)));
+}
+
 /** Centroid of a polygon (simple vertex average). */
 function polyCentroid(poly: Pt[]): Pt {
   let x = 0;
@@ -183,10 +225,29 @@ export function renderFrame(p: RenderParams): void {
     w: potW,
     h: potH,
   };
-  // Build the three features. Eyes are pushed apart along the line between them.
-  const rightEye = featureBase(landmarks, RIGHT_EYE, t, videoW, videoH, p.eyeScale);
-  const leftEye = featureBase(landmarks, LEFT_EYE, t, videoW, videoH, p.eyeScale);
-  const mouth = featureBase(landmarks, MOUTH, t, videoW, videoH, p.mouthScale);
+  // Build the three features. Eyes are pushed apart along the line between them,
+  // and eyes/mouth grow extra when opened wide.
+  const rightBoost = openBoost(
+    openRatio(landmarks, 159, 145, 33, 133, videoW, videoH),
+    EAR_NORMAL,
+    EAR_WIDE,
+    EYE_WIDE_MAX_BOOST,
+  );
+  const leftBoost = openBoost(
+    openRatio(landmarks, 386, 374, 362, 263, videoW, videoH),
+    EAR_NORMAL,
+    EAR_WIDE,
+    EYE_WIDE_MAX_BOOST,
+  );
+  const mouthBoost = openBoost(
+    openRatio(landmarks, 13, 14, 61, 291, videoW, videoH),
+    MAR_NORMAL,
+    MAR_WIDE,
+    MOUTH_WIDE_MAX_BOOST,
+  );
+  const rightEye = featureBase(landmarks, RIGHT_EYE, t, videoW, videoH, p.eyeScale * rightBoost);
+  const leftEye = featureBase(landmarks, LEFT_EYE, t, videoW, videoH, p.eyeScale * leftBoost);
+  const mouth = featureBase(landmarks, MOUTH, t, videoW, videoH, p.mouthScale * mouthBoost);
 
   // Head roll: angle of the line from the right eye to the left eye.
   const roll = Math.atan2(
