@@ -1,0 +1,166 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+  --bg: #1a1410;
+  --panel: #2a211a;
+  --accent: #d9a066;
+  --text: #f3e9dd;
+  --muted: #b09a85;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 50% 0%, #3a2c20 0%, var(--bg) 70%);
+  color: var(--text);
+}
+
+#app {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
+}
+
+h1 .spud {
+  font-size: 1.6rem;
+}
+
+.subtitle {
+  margin: 0 0 1.25rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.toolbar label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+select,
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid #4a3a2c;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+}
+
+select:hover,
+button:hover {
+  border-color: var(--accent);
+}
+
+button.toggle[aria-pressed="true"] {
+  background: var(--accent);
+  color: #2a1c10;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.sliders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.sliders label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  min-width: 200px;
+  flex: 1;
+}
+
+.sliders label em {
+  font-style: normal;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.sliders input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.sliders input[type="range"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.stage-wrap {
+  position: relative;
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid #4a3a2c;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.stage canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  font-size: 0.95rem;
+  border-radius: 14px;
+}
+
+.status.error {
+  color: #ff9b8a;
+}
+
+.hidden-video {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+footer {
+  margin-top: 1rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
