@@ -1,9 +1,10 @@
 // Potato rendering + feature compositing.
 //
 // The effect: a potato tracks the user's face. Holes shaped like the user's
-// eyes and mouth are cut into the scene at their real positions, showing the
-// live video through them — so the potato "wears" your features. Everything
-// outside the potato is filled with chroma green for keying in OBS.
+// eyes and mouth are cut at their real positions, showing the live video
+// through them — so the potato "wears" your features. Hole edges are feathered
+// so they blend into the potato. Everything outside the potato is chroma green
+// for keying in OBS. When no face is found, only the green background shows.
 
 import {
   faceBBox,
@@ -18,6 +19,10 @@ import {
 const POTATO_SCALE = 2.0;
 // Holes expanded slightly past the exact contour so the whole feature shows.
 const HOLE_EXPAND = 1.15;
+// Extra outward spacing for the eyes (fraction of half the eye spacing).
+const EYE_SEPARATION = 0.35;
+// Feather radius for hole edges, as a fraction of the potato width.
+const FEATHER_FRAC = 0.014;
 // Chroma key background — pure green keys cleanly in OBS.
 const CHROMA_GREEN = "#00ff00";
 
@@ -31,10 +36,15 @@ export interface RenderParams {
   landmarks: NormalizedPoint[] | null;
   potatoImage: HTMLImageElement | null;
   filterEnabled: boolean;
-  /** Zoom of the webcam image shown through the eye holes (1 = life-size). */
+  /** Zoom of the eye holes + their webcam image (1 = life-size). */
   eyeScale: number;
-  /** Zoom of the webcam image shown through the mouth hole (1 = life-size). */
+  /** Zoom of the mouth hole + its webcam image (1 = life-size). */
   mouthScale: number;
+}
+
+interface Pt {
+  x: number;
+  y: number;
 }
 
 /** Try to load an optional user-supplied potato image from /potato.png. */
@@ -64,6 +74,19 @@ function coverTransform(
 
 type CoverT = ReturnType<typeof coverTransform>;
 
+// Reused offscreen canvas for feathered feature compositing.
+let offCanvas: HTMLCanvasElement | null = null;
+let offCtx: CanvasRenderingContext2D | null = null;
+function getOffscreen(w: number, h: number): CanvasRenderingContext2D {
+  if (!offCanvas) {
+    offCanvas = document.createElement("canvas");
+    offCtx = offCanvas.getContext("2d");
+  }
+  if (offCanvas.width !== w) offCanvas.width = w;
+  if (offCanvas.height !== h) offCanvas.height = h;
+  return offCtx!;
+}
+
 /**
  * Ordered polygon (in canvas pixel space) tracing a feature's contour,
  * expanded outward from its centroid by `expand`. Points are sorted by angle
@@ -76,8 +99,8 @@ function featurePolygon(
   videoW: number,
   videoH: number,
   expand: number,
-): Array<{ x: number; y: number }> {
-  const pts = indices
+): Pt[] {
+  const pts: Pt[] = indices
     .map((i) => landmarks[i])
     .filter(Boolean)
     .map((p) => ({ x: p.x * videoW, y: p.y * videoH }));
@@ -101,20 +124,25 @@ function featurePolygon(
   }));
 }
 
-/** Trace a polygon path on the context (does not fill/stroke/clip). */
-function tracePolygon(
-  ctx: CanvasRenderingContext2D,
-  poly: Array<{ x: number; y: number }>,
-): void {
-  ctx.beginPath();
-  poly.forEach((p, i) => {
-    if (i === 0) ctx.moveTo(p.x, p.y);
-    else ctx.lineTo(p.x, p.y);
-  });
-  ctx.closePath();
+/** Centroid of a polygon (simple vertex average). */
+function polyCentroid(poly: Pt[]): Pt {
+  let x = 0;
+  let y = 0;
+  for (const p of poly) {
+    x += p.x;
+    y += p.y;
+  }
+  return { x: x / poly.length, y: y / poly.length };
 }
 
-/** Render one frame. Handles mirroring, greenscreen, potato + feature holes. */
+interface Feature {
+  poly: Pt[]; // hole polygon (already offset)
+  center: Pt; // zoom pivot (un-offset centroid)
+  offset: Pt; // outward displacement
+  scale: number;
+}
+
+/** Render one frame. */
 export function renderFrame(p: RenderParams): void {
   const { ctx, canvasW, canvasH, video, videoW, videoH } = p;
   const t = coverTransform(videoW, videoH, canvasW, canvasH);
@@ -126,18 +154,22 @@ export function renderFrame(p: RenderParams): void {
   ctx.translate(canvasW, 0);
   ctx.scale(-1, 1);
 
-  // No face / filter off → show the raw (mirrored) webcam for framing.
-  if (!p.filterEnabled || !p.landmarks) {
+  // Filter OFF → show the raw (mirrored) webcam for framing/camera selection.
+  if (!p.filterEnabled) {
     ctx.drawImage(video, t.dx, t.dy, t.drawW, t.drawH);
     ctx.restore();
     return;
   }
 
-  const landmarks = p.landmarks;
-
-  // Greenscreen everything; the potato and feature holes are drawn on top.
+  // Filter ON → greenscreen first. With no face, that is all we draw.
   ctx.fillStyle = CHROMA_GREEN;
   ctx.fillRect(0, 0, canvasW, canvasH);
+  if (!p.landmarks) {
+    ctx.restore();
+    return;
+  }
+
+  const landmarks = p.landmarks;
 
   // Potato region: centered on the face, scaled up.
   const face = faceBBox(landmarks, videoW, videoH);
@@ -151,57 +183,111 @@ export function renderFrame(p: RenderParams): void {
     w: potW,
     h: potH,
   };
-  drawPotato(ctx, potato, p.potatoImage);
+  // Build the three features. Eyes are pushed apart along the line between them.
+  const rightEye = featureBase(landmarks, RIGHT_EYE, t, videoW, videoH, p.eyeScale);
+  const leftEye = featureBase(landmarks, LEFT_EYE, t, videoW, videoH, p.eyeScale);
+  const mouth = featureBase(landmarks, MOUTH, t, videoW, videoH, p.mouthScale);
 
-  // Cut a hole shaped like each feature, then show the live video through it.
-  // `scale` grows the eye/mouth as a unit: the hole polygon and the webcam
-  // image inside it are both scaled by the same factor about the feature's
-  // center, so a larger eye is fully shown (not zoom-cropped) by a matching
-  // larger hole.
-  const features: Array<{ indices: number[]; scale: number }> = [
-    { indices: RIGHT_EYE, scale: p.eyeScale },
-    { indices: LEFT_EYE, scale: p.eyeScale },
-    { indices: MOUTH, scale: p.mouthScale },
-  ];
-  for (const { indices, scale } of features) {
-    const poly = featurePolygon(
-      landmarks,
-      indices,
-      t,
-      videoW,
-      videoH,
-      HOLE_EXPAND * scale,
-    );
-    if (poly.length < 3) continue;
+  // Head roll: angle of the line from the right eye to the left eye.
+  const roll = Math.atan2(
+    leftEye.center.y - rightEye.center.y,
+    leftEye.center.x - rightEye.center.x,
+  );
 
-    // Polygon centroid (canvas space) — the pivot for the content zoom.
-    let cx = 0;
-    let cy = 0;
-    for (const pt of poly) {
-      cx += pt.x;
-      cy += pt.y;
-    }
-    cx /= poly.length;
-    cy /= poly.length;
+  // Draw the potato rotated to match the head, under the feature holes.
+  drawPotato(ctx, potato, p.potatoImage, roll);
 
-    ctx.save();
-    tracePolygon(ctx, poly);
-    ctx.clip();
-    // Zoom the webcam image about the feature center.
-    ctx.translate(cx, cy);
-    ctx.scale(scale, scale);
-    ctx.translate(-cx, -cy);
-    ctx.drawImage(video, t.dx, t.dy, t.drawW, t.drawH);
-    ctx.restore();
+  const eyeMid: Pt = {
+    x: (rightEye.center.x + leftEye.center.x) / 2,
+    y: (rightEye.center.y + leftEye.center.y) / 2,
+  };
+  applyOffset(rightEye, {
+    x: (rightEye.center.x - eyeMid.x) * EYE_SEPARATION,
+    y: (rightEye.center.y - eyeMid.y) * EYE_SEPARATION,
+  });
+  applyOffset(leftEye, {
+    x: (leftEye.center.x - eyeMid.x) * EYE_SEPARATION,
+    y: (leftEye.center.y - eyeMid.y) * EYE_SEPARATION,
+  });
 
-    // Subtle rim so the hole reads as cut into the potato.
-    tracePolygon(ctx, poly);
-    ctx.lineWidth = Math.max(1.5, potW * 0.004);
-    ctx.strokeStyle = "rgba(60,38,18,0.5)";
-    ctx.stroke();
+  const features = [rightEye, leftEye, mouth].filter((f) => f.poly.length >= 3);
+
+  // Composite all features onto an offscreen canvas, then mask with a blurred
+  // union of their polygons so the edges feather into the potato.
+  const off = getOffscreen(canvasW, canvasH);
+  off.setTransform(1, 0, 0, 1, 0, 0);
+  off.globalCompositeOperation = "source-over";
+  off.filter = "none";
+  off.clearRect(0, 0, canvasW, canvasH);
+
+  for (const f of features) {
+    off.save();
+    // Clip to this feature's own hole so its zoomed video can't spill into the
+    // other holes (each feature draws the full frame, just transformed).
+    off.beginPath();
+    f.poly.forEach((p, i) => {
+      if (i === 0) off.moveTo(p.x, p.y);
+      else off.lineTo(p.x, p.y);
+    });
+    off.closePath();
+    off.clip();
+    // Zoom the webcam image about the feature center, plus its outward offset.
+    off.translate(f.offset.x, f.offset.y);
+    off.translate(f.center.x, f.center.y);
+    off.scale(f.scale, f.scale);
+    off.translate(-f.center.x, -f.center.y);
+    off.drawImage(video, t.dx, t.dy, t.drawW, t.drawH);
+    off.restore();
   }
 
+  // Mask to the UNION of all hole polygons in a single blurred fill. Filling
+  // each separately with destination-in would intersect (not union) them and
+  // erase everything, since the holes don't overlap.
+  const feather = Math.max(3, potW * FEATHER_FRAC);
+  off.globalCompositeOperation = "destination-in";
+  off.filter = `blur(${feather}px)`;
+  off.fillStyle = "#000";
+  off.beginPath();
+  for (const f of features) {
+    f.poly.forEach((p, i) => {
+      if (i === 0) off.moveTo(p.x, p.y);
+      else off.lineTo(p.x, p.y);
+    });
+    off.closePath();
+  }
+  off.fill();
+  off.filter = "none";
+  off.globalCompositeOperation = "source-over";
+
+  ctx.drawImage(off.canvas, 0, 0);
+
   ctx.restore();
+}
+
+/** Build a feature's hole polygon, zoom pivot, and zero offset. */
+function featureBase(
+  landmarks: NormalizedPoint[],
+  indices: number[],
+  t: CoverT,
+  videoW: number,
+  videoH: number,
+  scale: number,
+): Feature {
+  const poly = featurePolygon(
+    landmarks,
+    indices,
+    t,
+    videoW,
+    videoH,
+    HOLE_EXPAND * scale,
+  );
+  return { poly, center: polyCentroid(poly), offset: { x: 0, y: 0 }, scale };
+}
+
+/** Displace a feature's hole by `d` (the zoom pivot stays at the source). */
+function applyOffset(f: Feature, d: Pt): void {
+  f.offset = d;
+  f.poly = f.poly.map((p) => ({ x: p.x + d.x, y: p.y + d.y }));
 }
 
 /** Draw the potato into a region — user image if provided, else procedural. */
@@ -209,19 +295,33 @@ function drawPotato(
   ctx: CanvasRenderingContext2D,
   region: BBox,
   image: HTMLImageElement | null,
+  angle: number,
 ): void {
+  const cx = region.x + region.w / 2;
+  const cy = region.y + region.h / 2;
+
   if (image) {
-    ctx.drawImage(image, region.x, region.y, region.w, region.h);
+    // Contain the image within the region, preserving aspect ratio.
+    const ar = image.width / image.height;
+    const rar = region.w / region.h;
+    let w = region.w;
+    let h = region.h;
+    if (ar > rar) h = region.w / ar;
+    else w = region.h * ar;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    ctx.drawImage(image, -w / 2, -h / 2, w, h);
+    ctx.restore();
     return;
   }
 
-  const cx = region.x + region.w / 2;
-  const cy = region.y + region.h / 2;
   const rx = region.w / 2;
   const ry = region.h / 2;
 
   ctx.save();
   ctx.translate(cx, cy);
+  ctx.rotate(angle);
 
   // Lumpy blob: a base ellipse warped by a deterministic wobble.
   ctx.beginPath();
